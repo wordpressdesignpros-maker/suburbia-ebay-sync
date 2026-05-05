@@ -1,0 +1,35 @@
+name: Poll eBay sales
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run sync
+        env:
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+          EBAY_REFRESH_TOKEN_1: ${{ secrets.EBAY_REFRESH_TOKEN_1 }}
+          EBAY_REFRESH_TOKEN_2: ${{ secrets.EBAY_REFRESH_TOKEN_2 }}
+          EBAY_REFRESH_TOKEN_3: ${{ secrets.EBAY_REFRESH_TOKEN_3 }}
+          EBAY_REFRESH_TOKEN_4: ${{ secrets.EBAY_REFRESH_TOKEN_4 }}
+          EBAY_REFRESH_TOKEN_5: ${{ secrets.EBAY_REFRESH_TOKEN_5 }}
+          EBAY_REFRESH_TOKEN_6: ${{ secrets.EBAY_REFRESH_TOKEN_6 }}
+          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+          MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
+          MS_REFRESH_TOKEN: ${{ secrets.MS_REFRESH_TOKEN }}
+          ONEDRIVE_FILE_ID: ${{ secrets.ONEDRIVE_FILE_ID }}
+        run: node fetch_ebay.js
