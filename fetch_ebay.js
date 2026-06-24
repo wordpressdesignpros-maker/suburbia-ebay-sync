@@ -1,76 +1,46 @@
-// fetch_ebay.js
+// fetch_ebay.js  (income-form version)
 //
-// Polls eBay's Sell Fulfillment API for new orders across multiple accounts
-// and appends them to a Microsoft OneDrive Excel workbook via Graph API.
+// Polls eBay Sell Fulfillment orders across 6 accounts and writes each sold
+// line item into a monthly tab of a OneDrive Excel workbook laid out like
+// Simon's income/expenditure form:
+//   INCOME:  A=DATE (DD.MM.YYYY)  B=PRODUCT (eBay title)  C=QUANTITY  D=£ (unit)
+// A hidden "_state" sheet holds an order-line key per row so nothing is written
+// twice. Month tabs are named e.g. "Jun 2026" and auto-created if missing.
 //
-// State is held inside the spreadsheet itself: for each account we look up
-// the most recent orderDate already on the Sales tab and only fetch newer
-// orders. No external state file required.
-//
-// Required environment variables (set as GitHub Secrets):
-//   EBAY_APP_ID           - eBay developer App ID (Client ID)
-//   EBAY_CERT_ID          - eBay developer Cert ID (Client Secret)
-//   EBAY_REFRESH_TOKEN_1  - refresh token for eBay account 1
-//   EBAY_REFRESH_TOKEN_2  - refresh token for eBay account 2
-//   ... up to EBAY_REFRESH_TOKEN_6
-//   MS_CLIENT_ID          - Azure AD app client ID
-//   MS_CLIENT_SECRET      - Azure AD app client secret
-//   MS_TENANT_ID          - Azure AD tenant ID (or "consumers" for personal account)
-//   MS_REFRESH_TOKEN      - Microsoft Graph refresh token
-//   ONEDRIVE_FILE_ID      - drive item ID of the spreadsheet
+// Env (GitHub secrets):
+//   EBAY_APP_ID, EBAY_CERT_ID, EBAY_REFRESH_TOKEN_1..6
+//   MS_CLIENT_ID, MS_TENANT_ID, MS_REFRESH_TOKEN (public client, no secret)
+//   ONEDRIVE_FILE_ID
 
-const ACCOUNTS = [
-  { idx: 1, name: "Account 1" },
-  { idx: 2, name: "Account 2" },
-  { idx: 3, name: "Account 3" },
-  { idx: 4, name: "Account 4" },
-  { idx: 5, name: "Account 5" },
-  { idx: 6, name: "Account 6" },
-];
-
-const TABLE_NAME = "tblSales";
+const ACCOUNTS = [1, 2, 3, 4, 5, 6].map((i) => ({ idx: i }));
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const STATE = "_state";
 
 // ---------------------------------------------------------------------------
-// eBay OAuth helpers
+// eBay
 // ---------------------------------------------------------------------------
-
 async function ebayAccessToken(refreshToken) {
-  const creds = Buffer
-    .from(`${process.env.EBAY_APP_ID}:${process.env.EBAY_CERT_ID}`)
-    .toString("base64");
-  const body = new URLSearchParams({
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-    scope: "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
-  });
+  const creds = Buffer.from(`${process.env.EBAY_APP_ID}:${process.env.EBAY_CERT_ID}`).toString("base64");
   const r = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
     method: "POST",
-    headers: {
-      Authorization: `Basic ${creds}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
+    headers: { Authorization: `Basic ${creds}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      scope: "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
+    }),
   });
   if (!r.ok) throw new Error(`eBay token refresh failed: ${r.status} ${await r.text()}`);
-  const j = await r.json();
-  return j.access_token;
+  return (await r.json()).access_token;
 }
 
 async function ebayFetchOrders(accessToken, sinceIso) {
-  const params = new URLSearchParams({
-    filter: `creationdate:[${sinceIso}..]`,
-    limit: "200",
-  });
   const orders = [];
-  let url = `https://api.ebay.com/sell/fulfillment/v1/order?${params}`;
-
+  let url = `https://api.ebay.com/sell/fulfillment/v1/order?${new URLSearchParams({
+    filter: `creationdate:[${sinceIso}..]`, limit: "200",
+  })}`;
   while (url) {
-    const r = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-    });
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } });
     if (!r.ok) throw new Error(`eBay order fetch failed: ${r.status} ${await r.text()}`);
     const j = await r.json();
     if (j.orders) orders.push(...j.orders);
@@ -80,10 +50,9 @@ async function ebayFetchOrders(accessToken, sinceIso) {
 }
 
 // ---------------------------------------------------------------------------
-// Microsoft Graph helpers
+// Microsoft Graph (public client refresh token)
 // ---------------------------------------------------------------------------
-
-async function msAccessToken() {
+async function msToken() {
   const tenant = process.env.MS_TENANT_ID || "consumers";
   const params = {
     client_id: process.env.MS_CLIENT_ID,
@@ -91,182 +60,144 @@ async function msAccessToken() {
     refresh_token: process.env.MS_REFRESH_TOKEN,
     scope: "Files.ReadWrite offline_access",
   };
-  // Public client (no secret) is used by default. Only send client_secret
-  // if one is configured (confidential client / dedicated Azure app).
-  if (process.env.MS_CLIENT_SECRET) {
-    params.client_secret = process.env.MS_CLIENT_SECRET;
-  }
-  const body = new URLSearchParams(params);
-  const r = await fetch(
-    `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    },
-  );
+  if (process.env.MS_CLIENT_SECRET) params.client_secret = process.env.MS_CLIENT_SECRET;
+  const r = await fetch(`https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(params),
+  });
   if (!r.ok) throw new Error(`Microsoft token refresh failed: ${r.status} ${await r.text()}`);
-  const j = await r.json();
-  return j.access_token;
+  return (await r.json()).access_token;
 }
 
-async function msReadTableRows(token, fileId, tableName) {
-  const url = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/workbook/tables/${encodeURIComponent(tableName)}/range`;
+const FID = () => process.env.ONEDRIVE_FILE_ID;
+const WB = () => `https://graph.microsoft.com/v1.0/me/drive/items/${FID()}/workbook`;
+const wsPath = (name) => `${WB()}/worksheets('${encodeURIComponent(name)}')`;
+
+async function gfetch(token, url, opts = {}) {
   const r = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
+    ...opts,
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(opts.headers || {}) },
   });
-  if (!r.ok) throw new Error(`Read table failed: ${r.status} ${await r.text()}`);
-  const j = await r.json();
-  return j.values || [];
+  if (!r.ok) throw new Error(`Graph ${opts.method || "GET"} ${url.split("/workbook")[1] || url} -> ${r.status} ${await r.text()}`);
+  return r.status === 204 ? null : r.json();
 }
 
-async function msAppendRows(token, fileId, tableName, rows) {
-  const url = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/workbook/tables/${encodeURIComponent(tableName)}/rows`;
-  const r = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ values: rows }),
+async function listSheets(token) {
+  const j = await gfetch(token, `${WB()}/worksheets?$select=name`);
+  return (j.value || []).map((w) => w.name);
+}
+
+async function ensureMonthTab(token, name, existing) {
+  if (existing.includes(name)) return;
+  await gfetch(token, `${WB()}/worksheets/add`, { method: "POST", body: JSON.stringify({ name }) });
+  // minimal headers so a runtime-created tab is still usable
+  await gfetch(token, `${wsPath(name)}/range(address='A4:D4')`, {
+    method: "PATCH", body: JSON.stringify({ values: [["DATE", "PRODUCT", "QUANTITY", "£"]] }),
   });
-  if (!r.ok) throw new Error(`Append rows failed: ${r.status} ${await r.text()}`);
-  return r.json();
+  await gfetch(token, `${wsPath(name)}/range(address='B2')`, {
+    method: "PATCH", body: JSON.stringify({ values: [["INCOME"]] }),
+  });
+  existing.push(name);
 }
 
-// ---------------------------------------------------------------------------
-// Determine "lastSeen" per account from existing Sales tab data
-// ---------------------------------------------------------------------------
-
-// Normalise a date cell to an ISO 8601 string. Excel/Graph may return a date
-// either as an ISO string OR as an Excel serial number (days since 1899-12-30,
-// where 25569 == 1970-01-01). Anything unparseable returns null and is ignored.
-function toIso(val) {
-  if (val === null || val === undefined || val === "") return null;
-  const num =
-    typeof val === "number"
-      ? val
-      : /^\d+(\.\d+)?$/.test(String(val).trim())
-      ? parseFloat(val)
-      : NaN;
-  if (!isNaN(num) && num > 20000 && num < 80000) {
-    // plausible Excel serial date
-    return new Date(Math.round((num - 25569) * 86400 * 1000)).toISOString();
+// count income rows already present (column A from row 6)
+async function nextIncomeRow(token, name) {
+  const j = await gfetch(token, `${wsPath(name)}/range(address='A6:A5000')?$select=values`);
+  const vals = j.values || [];
+  let count = 0;
+  for (const row of vals) {
+    if (row[0] !== null && row[0] !== "") count++;
+    else break; // contiguous block
   }
-  const d = new Date(val);
-  return isNaN(d.getTime()) ? null : d.toISOString();
+  return 6 + count;
 }
 
-function lastSeenFromSheet(values) {
-  const lastSeen = {};
-  if (!values || values.length < 2) return lastSeen;
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const iso = toIso(row[0]);
-    const account = row[1];
-    if (!iso || !account) continue;
-    const cur = lastSeen[account];
-    if (!cur || iso > cur) lastSeen[account] = iso;
-  }
-  return lastSeen;
+async function readState(token) {
+  const j = await gfetch(token, `${wsPath(STATE)}/usedRange?$select=values,rowCount`);
+  const vals = j.values || [];
+  const keys = new Set();
+  for (let i = 1; i < vals.length; i++) if (vals[i][0]) keys.add(String(vals[i][0]));
+  return { keys, nextRow: (j.rowCount || 1) + 1 };
+}
+
+function ddmmyyyy(iso) {
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getUTCDate())}.${p(d.getUTCMonth() + 1)}.${d.getUTCFullYear()}`;
+}
+function tabFor(iso) {
+  const d = new Date(iso);
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
 
 function defaultSince() {
-  return new Date(Date.now() - 7 * 86400000).toISOString();
-}
-
-// ---------------------------------------------------------------------------
-// Build rows from eBay orders (one row per line item, fees split proportionally)
-// ---------------------------------------------------------------------------
-
-function ordersToRows(orders, accountName) {
-  const rows = [];
-  for (const o of orders) {
-    const lis = o.lineItems || [];
-    const feeTotal = parseFloat(o.totalFeeBasisAmount?.value || 0);
-    const sumItems = lis.reduce(
-      (s, li) => s + parseFloat(li.lineItemCost?.value || 0), 0,
-    ) || 1;
-    for (const li of lis) {
-      const it = parseFloat(li.lineItemCost?.value || 0);
-      const post = parseFloat(li.deliveryCost?.shippingCost?.value || 0);
-      const qty = li.quantity || 1;
-      rows.push([
-        o.creationDate,
-        accountName,
-        o.orderId,
-        li.title || "",
-        li.sku || "",
-        qty,
-        it / qty,
-        it,
-        post,
-        it + post,
-        Math.round((it / sumItems) * feeTotal * 100) / 100,
-        o.orderPaymentStatus === "PAID" ? "Paid" : "Pending",
-      ]);
-    }
-  }
-  return rows;
+  return new Date(Date.now() - 14 * 86400000).toISOString();
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-
 async function main() {
-  const fileId = process.env.ONEDRIVE_FILE_ID;
-  if (!fileId) throw new Error("ONEDRIVE_FILE_ID env var not set");
+  if (!FID()) throw new Error("ONEDRIVE_FILE_ID not set");
+  const token = await msToken();
+  const { keys: seen, nextRow: stateNextRow } = await readState(token);
+  let sheets = await listSheets(token);
+  const since = defaultSince();
 
-  const msToken = await msAccessToken();
-  const sheet = await msReadTableRows(msToken, fileId, TABLE_NAME);
-  const lastSeen = lastSeenFromSheet(sheet);
-  const fallback = defaultSince();
+  // gather new line items grouped by month tab
+  const byTab = {}; // tab -> array of [date, title, qty, unitPrice]
+  const newKeys = [];
 
-  // Build a set of orderIds already in the sheet (column index 2) so we never
-  // write the same order twice. eBay's creationdate filter is inclusive, so the
-  // boundary order would otherwise be re-added on every run.
-  const seenOrderIds = new Set();
-  if (sheet) {
-    for (let i = 1; i < sheet.length; i++) {
-      const oid = sheet[i] && sheet[i][2];
-      if (oid) seenOrderIds.add(String(oid));
-    }
-  }
-
-  const allRows = [];
   for (const acc of ACCOUNTS) {
     const refresh = process.env[`EBAY_REFRESH_TOKEN_${acc.idx}`];
-    if (!refresh) {
-      console.log(`Skipping ${acc.name} — no refresh token configured`);
-      continue;
-    }
+    if (!refresh) { console.log(`Account ${acc.idx}: no token, skipping`); continue; }
     try {
-      const since = lastSeen[acc.name] || fallback;
-      console.log(`${acc.name}: fetching orders since ${since}`);
       const access = await ebayAccessToken(refresh);
       const orders = await ebayFetchOrders(access, since);
-      const fresh = orders.filter((o) => !seenOrderIds.has(String(o.orderId)));
-      for (const o of fresh) seenOrderIds.add(String(o.orderId));
-      const rows = ordersToRows(fresh, acc.name);
-      console.log(`${acc.name}: ${orders.length} fetched, ${fresh.length} new → ${rows.length} rows`);
-      allRows.push(...rows);
+      let added = 0;
+      for (const o of orders) {
+        for (const li of o.lineItems || []) {
+          const key = `${o.orderId}|${li.lineItemId}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const qty = li.quantity || 1;
+          const lineCost = parseFloat(li.lineItemCost?.value || 0);
+          const unit = qty ? Math.round((lineCost / qty) * 100) / 100 : lineCost;
+          const tab = tabFor(o.creationDate);
+          (byTab[tab] = byTab[tab] || []).push([ddmmyyyy(o.creationDate), li.title || "", qty, unit]);
+          newKeys.push(key);
+          added++;
+        }
+      }
+      console.log(`Account ${acc.idx}: ${orders.length} orders, ${added} new line items`);
     } catch (e) {
-      console.error(`${acc.name} failed: ${e.message}`);
+      console.error(`Account ${acc.idx} failed: ${e.message}`);
     }
   }
 
-  if (allRows.length === 0) {
-    console.log("Nothing new to write.");
-    return;
+  const tabs = Object.keys(byTab);
+  if (tabs.length === 0) { console.log("Nothing new to write."); return; }
+
+  let written = 0;
+  for (const tab of tabs) {
+    await ensureMonthTab(token, tab, sheets);
+    const rows = byTab[tab];
+    const start = await nextIncomeRow(token, tab);
+    const end = start + rows.length - 1;
+    await gfetch(token, `${wsPath(tab)}/range(address='A${start}:D${end}')`, {
+      method: "PATCH", body: JSON.stringify({ values: rows }),
+    });
+    console.log(`${tab}: wrote ${rows.length} rows (A${start}:D${end})`);
+    written += rows.length;
   }
 
-  const writeToken = await msAccessToken();
-  await msAppendRows(writeToken, fileId, TABLE_NAME, allRows);
-  console.log(`Wrote ${allRows.length} rows to ${TABLE_NAME}.`);
+  // record keys in _state
+  const sStart = stateNextRow;
+  const sEnd = sStart + newKeys.length - 1;
+  await gfetch(token, `${wsPath(STATE)}/range(address='A${sStart}:A${sEnd}')`, {
+    method: "PATCH", body: JSON.stringify({ values: newKeys.map((k) => [k]) }),
+  });
+  console.log(`Wrote ${written} income rows across ${tabs.length} tab(s); recorded ${newKeys.length} keys.`);
 }
 
-main().catch(e => {
-  console.error(e);
-  process.exit(1);
-});
+main().catch((e) => { console.error(e); process.exit(1); });
