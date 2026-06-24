@@ -138,15 +138,35 @@ async function msAppendRows(token, fileId, tableName, rows) {
 // Determine "lastSeen" per account from existing Sales tab data
 // ---------------------------------------------------------------------------
 
+// Normalise a date cell to an ISO 8601 string. Excel/Graph may return a date
+// either as an ISO string OR as an Excel serial number (days since 1899-12-30,
+// where 25569 == 1970-01-01). Anything unparseable returns null and is ignored.
+function toIso(val) {
+  if (val === null || val === undefined || val === "") return null;
+  const num =
+    typeof val === "number"
+      ? val
+      : /^\d+(\.\d+)?$/.test(String(val).trim())
+      ? parseFloat(val)
+      : NaN;
+  if (!isNaN(num) && num > 20000 && num < 80000) {
+    // plausible Excel serial date
+    return new Date(Math.round((num - 25569) * 86400 * 1000)).toISOString();
+  }
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 function lastSeenFromSheet(values) {
   const lastSeen = {};
   if (!values || values.length < 2) return lastSeen;
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
-    const [date, account] = row;
-    if (!date || !account) continue;
-    const cur = lastSeen[account] || "";
-    if (date > cur) lastSeen[account] = date;
+    const iso = toIso(row[0]);
+    const account = row[1];
+    if (!iso || !account) continue;
+    const cur = lastSeen[account];
+    if (!cur || iso > cur) lastSeen[account] = iso;
   }
   return lastSeen;
 }
