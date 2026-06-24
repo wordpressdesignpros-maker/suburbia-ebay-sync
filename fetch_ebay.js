@@ -130,6 +130,20 @@ function tabFor(iso) {
   return `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
 
+// Sort a month tab's income block (A6:D...) by date ascending. Dates are
+// "DD.MM.YYYY" text; within one month tab that sorts chronologically.
+async function sortTab(token, tab) {
+  const j = await gfetch(token, `${wsPath(tab)}/range(address='A6:D5000')?$select=values`);
+  const rows = (j.values || []).filter((r) => r[0] !== null && r[0] !== "");
+  if (rows.length < 2) return;
+  const k = (s) => { const [d, m, y] = String(s).split("."); return (+y) * 10000 + (+m) * 100 + (+d); };
+  rows.sort((a, b) => k(a[0]) - k(b[0]));
+  await gfetch(token, `${wsPath(tab)}/range(address='A6:D${5 + rows.length}')`, {
+    method: "PATCH", body: JSON.stringify({ values: rows }),
+  });
+  console.log(`Sorted ${tab} (${rows.length} rows)`);
+}
+
 function defaultSince() {
   // From the 1st of the current month, so a full month is always captured.
   // De-dup (the _state sheet) prevents anything being written twice.
@@ -179,7 +193,6 @@ async function main() {
   }
 
   const tabs = Object.keys(byTab);
-  if (tabs.length === 0) { console.log("Nothing new to write."); return; }
 
   let written = 0;
   for (const tab of tabs) {
@@ -195,11 +208,23 @@ async function main() {
   }
 
   // record keys in _state
-  const sStart = stateNextRow;
-  const sEnd = sStart + newKeys.length - 1;
-  await gfetch(token, `${wsPath(STATE)}/range(address='A${sStart}:A${sEnd}')`, {
-    method: "PATCH", body: JSON.stringify({ values: newKeys.map((k) => [k]) }),
-  });
+  if (newKeys.length) {
+    const sStart = stateNextRow;
+    const sEnd = sStart + newKeys.length - 1;
+    await gfetch(token, `${wsPath(STATE)}/range(address='A${sStart}:A${sEnd}')`, {
+      method: "PATCH", body: JSON.stringify({ values: newKeys.map((k) => [k]) }),
+    });
+  }
+
+  // keep affected tabs + the current month tab sorted by date
+  const toSort = new Set(tabs);
+  toSort.add(tabFor(new Date().toISOString()));
+  for (const tab of toSort) {
+    if (sheets.includes(tab)) {
+      try { await sortTab(token, tab); } catch (e) { console.error(`sort ${tab} failed: ${e.message}`); }
+    }
+  }
+
   console.log(`Wrote ${written} income rows across ${tabs.length} tab(s); recorded ${newKeys.length} keys.`);
 }
 
