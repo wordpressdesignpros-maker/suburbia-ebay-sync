@@ -223,6 +223,17 @@ async function main() {
   const lastSeen = lastSeenFromSheet(sheet);
   const fallback = defaultSince();
 
+  // Build a set of orderIds already in the sheet (column index 2) so we never
+  // write the same order twice. eBay's creationdate filter is inclusive, so the
+  // boundary order would otherwise be re-added on every run.
+  const seenOrderIds = new Set();
+  if (sheet) {
+    for (let i = 1; i < sheet.length; i++) {
+      const oid = sheet[i] && sheet[i][2];
+      if (oid) seenOrderIds.add(String(oid));
+    }
+  }
+
   const allRows = [];
   for (const acc of ACCOUNTS) {
     const refresh = process.env[`EBAY_REFRESH_TOKEN_${acc.idx}`];
@@ -235,8 +246,10 @@ async function main() {
       console.log(`${acc.name}: fetching orders since ${since}`);
       const access = await ebayAccessToken(refresh);
       const orders = await ebayFetchOrders(access, since);
-      const rows = ordersToRows(orders, acc.name);
-      console.log(`${acc.name}: ${orders.length} orders → ${rows.length} rows`);
+      const fresh = orders.filter((o) => !seenOrderIds.has(String(o.orderId)));
+      for (const o of fresh) seenOrderIds.add(String(o.orderId));
+      const rows = ordersToRows(fresh, acc.name);
+      console.log(`${acc.name}: ${orders.length} fetched, ${fresh.length} new → ${rows.length} rows`);
       allRows.push(...rows);
     } catch (e) {
       console.error(`${acc.name} failed: ${e.message}`);
