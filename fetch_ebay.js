@@ -131,7 +131,10 @@ function tabFor(iso) {
 }
 
 function defaultSince() {
-  return new Date(Date.now() - 14 * 86400000).toISOString();
+  // From the 1st of the current month, so a full month is always captured.
+  // De-dup (the _state sheet) prevents anything being written twice.
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0)).toISOString();
 }
 
 // ---------------------------------------------------------------------------
