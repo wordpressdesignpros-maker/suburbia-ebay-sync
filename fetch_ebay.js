@@ -2,6 +2,22 @@
 //
 // Polls eBay's Sell Fulfillment API for new orders across multiple accounts
 // and appends them to a Microsoft OneDrive Excel workbook via Graph API.
+//
+// State is held inside the spreadsheet itself: for each account we look up
+// the most recent orderDate already on the Sales tab and only fetch newer
+// orders. No external state file required.
+//
+// Required environment variables (set as GitHub Secrets):
+//   EBAY_APP_ID           - eBay developer App ID (Client ID)
+//   EBAY_CERT_ID          - eBay developer Cert ID (Client Secret)
+//   EBAY_REFRESH_TOKEN_1  - refresh token for eBay account 1
+//   EBAY_REFRESH_TOKEN_2  - refresh token for eBay account 2
+//   ... up to EBAY_REFRESH_TOKEN_6
+//   MS_CLIENT_ID          - Azure AD app client ID
+//   MS_CLIENT_SECRET      - Azure AD app client secret
+//   MS_TENANT_ID          - Azure AD tenant ID (or "consumers" for personal account)
+//   MS_REFRESH_TOKEN      - Microsoft Graph refresh token
+//   ONEDRIVE_FILE_ID      - drive item ID of the spreadsheet
 
 const ACCOUNTS = [
   { idx: 1, name: "Account 1" },
@@ -13,6 +29,10 @@ const ACCOUNTS = [
 ];
 
 const TABLE_NAME = "tblSales";
+
+// ---------------------------------------------------------------------------
+// eBay OAuth helpers
+// ---------------------------------------------------------------------------
 
 async function ebayAccessToken(refreshToken) {
   const creds = Buffer
@@ -43,6 +63,7 @@ async function ebayFetchOrders(accessToken, sinceIso) {
   });
   const orders = [];
   let url = `https://api.ebay.com/sell/fulfillment/v1/order?${params}`;
+
   while (url) {
     const r = await fetch(url, {
       headers: {
@@ -58,15 +79,24 @@ async function ebayFetchOrders(accessToken, sinceIso) {
   return orders;
 }
 
+// ---------------------------------------------------------------------------
+// Microsoft Graph helpers
+// ---------------------------------------------------------------------------
+
 async function msAccessToken() {
   const tenant = process.env.MS_TENANT_ID || "consumers";
-  const body = new URLSearchParams({
+  const params = {
     client_id: process.env.MS_CLIENT_ID,
-    client_secret: process.env.MS_CLIENT_SECRET,
     grant_type: "refresh_token",
     refresh_token: process.env.MS_REFRESH_TOKEN,
     scope: "Files.ReadWrite offline_access",
-  });
+  };
+  // Public client (no secret) is used by default. Only send client_secret
+  // if one is configured (confidential client / dedicated Azure app).
+  if (process.env.MS_CLIENT_SECRET) {
+    params.client_secret = process.env.MS_CLIENT_SECRET;
+  }
+  const body = new URLSearchParams(params);
   const r = await fetch(
     `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`,
     {
@@ -104,6 +134,10 @@ async function msAppendRows(token, fileId, tableName, rows) {
   return r.json();
 }
 
+// ---------------------------------------------------------------------------
+// Determine "lastSeen" per account from existing Sales tab data
+// ---------------------------------------------------------------------------
+
 function lastSeenFromSheet(values) {
   const lastSeen = {};
   if (!values || values.length < 2) return lastSeen;
@@ -120,6 +154,10 @@ function lastSeenFromSheet(values) {
 function defaultSince() {
   return new Date(Date.now() - 7 * 86400000).toISOString();
 }
+
+// ---------------------------------------------------------------------------
+// Build rows from eBay orders (one row per line item, fees split proportionally)
+// ---------------------------------------------------------------------------
 
 function ordersToRows(orders, accountName) {
   const rows = [];
@@ -152,18 +190,24 @@ function ordersToRows(orders, accountName) {
   return rows;
 }
 
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 async function main() {
   const fileId = process.env.ONEDRIVE_FILE_ID;
   if (!fileId) throw new Error("ONEDRIVE_FILE_ID env var not set");
+
   const msToken = await msAccessToken();
   const sheet = await msReadTableRows(msToken, fileId, TABLE_NAME);
   const lastSeen = lastSeenFromSheet(sheet);
   const fallback = defaultSince();
+
   const allRows = [];
   for (const acc of ACCOUNTS) {
     const refresh = process.env[`EBAY_REFRESH_TOKEN_${acc.idx}`];
     if (!refresh) {
-      console.log(`Skipping ${acc.name} - no refresh token configured`);
+      console.log(`Skipping ${acc.name} — no refresh token configured`);
       continue;
     }
     try {
@@ -172,16 +216,18 @@ async function main() {
       const access = await ebayAccessToken(refresh);
       const orders = await ebayFetchOrders(access, since);
       const rows = ordersToRows(orders, acc.name);
-      console.log(`${acc.name}: ${orders.length} orders -> ${rows.length} rows`);
+      console.log(`${acc.name}: ${orders.length} orders → ${rows.length} rows`);
       allRows.push(...rows);
     } catch (e) {
       console.error(`${acc.name} failed: ${e.message}`);
     }
   }
+
   if (allRows.length === 0) {
     console.log("Nothing new to write.");
     return;
   }
+
   const writeToken = await msAccessToken();
   await msAppendRows(writeToken, fileId, TABLE_NAME, allRows);
   console.log(`Wrote ${allRows.length} rows to ${TABLE_NAME}.`);
