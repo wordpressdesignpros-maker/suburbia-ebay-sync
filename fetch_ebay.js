@@ -2,12 +2,13 @@
 //
 // Each run REBUILDS the current month tab from live eBay data, so cancelled /
 // refunded orders self-correct. Layout per month tab:
-//   INCOME      A:E  DATE / PRODUCT / QUANTITY / UNIT £ / TOTAL £   (rebuilt)
-//   MANUAL EXP  G:J  you fill in (never touched by the sync)
-//   SUMMARY     L:M  item sales, refunds, net income, eBay fees, postage,
-//                    other exp, net profit, margin, orders, AOV
-//   BY ACCOUNT  O:Q  per-account income + fees
-// eBay fees, postage and refunds are running totals from the Finances ledger.
+//   INCOME      A:G  DATE / CUSTOMER / POSTCODE / PRODUCT / QUANTITY / UNIT £ / TOTAL £
+//   MANUAL EXP  I:L  you fill in (never touched by the sync)
+//   SUMMARY     N:O  item sales, refunds, net income, eBay fees, ad fees,
+//                    postage, other exp, net profit, margin, orders, AOV
+//   BY ACCOUNT  Q:T  per-account income + fees + ad fees
+//   BEST SELLERS V:X top products by quantity + sales
+// eBay fees, ad fees, postage and refunds are running totals from the ledger.
 
 const crypto = require("crypto");
 
@@ -71,6 +72,22 @@ function feeAmount(t) {
   return f;
 }
 
+// promoted listings / advertising fees vs ordinary selling fees
+const isAdFee = (ft) => /AD[_ ]?FEE|ADVERT|PROMOT/i.test(String(ft || ""));
+function splitFees(t) {
+  let sell = 0, ad = 0, hadDetail = false;
+  for (const li of t.orderLineItems || []) for (const mf of li.marketplaceFees || []) {
+    hadDetail = true;
+    const amt = Math.abs(parseFloat(mf.amount?.value || 0));
+    if (isAdFee(mf.feeType)) ad += amt; else sell += amt;
+  }
+  if (!hadDetail) {
+    const amt = Math.abs(parseFloat(t.totalFeeAmount?.value || 0));
+    if (isAdFee(t.feeType)) ad += amt; else sell += amt;
+  }
+  return { sell, ad };
+}
+
 // ---------------------------------------------------------------- Graph
 async function msToken() {
   const tenant = process.env.MS_TENANT_ID || "consumers";
@@ -99,13 +116,15 @@ async function ensureMonthTab(token, name, existing) {
   await patch(token, name, "I2", [["OTHER EXPENDITURE (you fill in)"]]);
   await patch(token, name, "N2", [["SUMMARY"]]);
   await patch(token, name, "Q2", [["BY ACCOUNT"]]);
+  await patch(token, name, "V2", [["BEST SELLERS"]]);
   await patch(token, name, "A4:G4", [["DATE", "CUSTOMER", "POSTCODE", "PRODUCT", "QUANTITY", "UNIT £", "TOTAL £"]]);
   await patch(token, name, "I4:L4", [["DATE", "DESCRIPTION", "CATEGORY", "£"]]);
-  await patch(token, name, "Q4:S4", [["ACCOUNT", "INCOME £", "FEES £"]]);
-  await patch(token, name, "N4:O13", [
+  await patch(token, name, "Q4:T4", [["ACCOUNT", "INCOME £", "FEES £", "AD FEES £"]]);
+  await patch(token, name, "V4:X4", [["PRODUCT", "QTY", "SALES £"]]);
+  await patch(token, name, "N4:O14", [
     ["Item sales", "=SUM($G$6:$G$100000)"], ["Refunds (deducted)", 0], ["Net income", "=O4-O5"],
-    ["eBay fees", 0], ["Postage", 0], ["Other expenditure", "=SUM($L$6:$L$100000)"],
-    ["Net profit", "=O6-O7-O8-O9"], ["Profit margin", "=IF(O6=0,0,O10/O6)"], ["Orders", 0], ["Avg order value", "=IF(O12=0,0,O6/O12)"],
+    ["eBay fees", 0], ["Promoted/ad fees", 0], ["Postage", 0], ["Other expenditure", "=SUM($L$6:$L$100000)"],
+    ["Net profit", "=O6-O7-O8-O9-O10"], ["Profit margin", "=IF(O6=0,0,O11/O6)"], ["Orders", 0], ["Avg order value", "=IF(O13=0,0,O6/O13)"],
   ]);
   await patch(token, name, "Q5:Q10", [["Account 1"], ["Account 2"], ["Account 3"], ["Account 4"], ["Account 5"], ["Account 6"]]);
   existing.push(name);
@@ -127,7 +146,7 @@ async function main() {
 
   const income = [];
   const perAcc = {};
-  let refunds = 0, fees = 0, feeCredits = 0, postage = 0;
+  let refunds = 0, fees = 0, ads = 0, feeCredits = 0, postage = 0;
   const orderIds = new Set();
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -135,7 +154,7 @@ async function main() {
 
   for (const acc of ACCOUNTS) {
     const refresh = process.env[`EBAY_REFRESH_TOKEN_${acc.idx}`];
-    perAcc[acc.idx] = { income: 0, fees: 0, feeCredits: 0 };
+    perAcc[acc.idx] = { income: 0, fees: 0, ads: 0, feeCredits: 0 };
     if (!refresh) { failed.push(acc.idx); continue; }
 
     let ok = false, lastErr;
@@ -147,7 +166,7 @@ async function main() {
 
         // accumulate into locals first so a retry can never double-count
         const localIncome = [], localIds = new Set();
-        let aInc = 0, aFees = 0, aCred = 0, aRef = 0, aPost = 0;
+        let aInc = 0, aFees = 0, aAds = 0, aCred = 0, aRef = 0, aPost = 0;
         for (const o of orders) {
           const cs = o.cancelStatus?.cancelState;
           if (cs && cs !== "NONE_REQUESTED") continue;
@@ -164,16 +183,16 @@ async function main() {
           }
         }
         for (const t of txns) {
-          if (t.transactionType === "SALE") aFees += feeAmount(t);
-          else if (t.transactionType === "NON_SALE_CHARGE") aFees += Math.abs(parseFloat(t.amount?.value || 0));
+          if (t.transactionType === "SALE") { const s = splitFees(t); aFees += s.sell; aAds += s.ad; }
+          else if (t.transactionType === "NON_SALE_CHARGE") { const amt = Math.abs(parseFloat(t.amount?.value || 0)); if (isAdFee(t.feeType)) aAds += amt; else aFees += amt; }
           else if (t.transactionType === "SHIPPING_LABEL") aPost += Math.abs(parseFloat(t.amount?.value || 0));
           else if (t.transactionType === "REFUND") { aRef += Math.abs(parseFloat(t.amount?.value || 0)); aCred += feeAmount(t); }
         }
 
         income.push(...localIncome);
         for (const id of localIds) orderIds.add(id);
-        perAcc[acc.idx] = { income: aInc, fees: aFees, feeCredits: aCred };
-        fees += aFees; feeCredits += aCred; refunds += aRef; postage += aPost;
+        perAcc[acc.idx] = { income: aInc, fees: aFees, ads: aAds, feeCredits: aCred };
+        fees += aFees; ads += aAds; feeCredits += aCred; refunds += aRef; postage += aPost;
         ok = true;
         console.log(`Account ${acc.idx}: ${orders.length} orders, ${txns.length} txns`);
       } catch (e) {
@@ -190,20 +209,37 @@ async function main() {
   }
 
   income.sort((a, b) => dateKey(a[0]) - dateKey(b[0]));
-  fees = round2(fees - feeCredits); refunds = round2(refunds); postage = round2(postage);
+  fees = round2(fees - feeCredits); ads = round2(ads); refunds = round2(refunds); postage = round2(postage);
+
+  // best sellers: aggregate by product title across all accounts
+  const prodMap = new Map();
+  for (const r of income) {
+    const title = r[3] || "(no title)";
+    const cur = prodMap.get(title) || { qty: 0, sales: 0 };
+    cur.qty += Number(r[4]) || 0;
+    cur.sales += Number(r[6]) || 0;
+    prodMap.set(title, cur);
+  }
+  const best = [...prodMap.entries()]
+    .sort((a, b) => b[1].qty - a[1].qty || b[1].sales - a[1].sales)
+    .slice(0, 15)
+    .map(([title, v]) => [title, v.qty, round2(v.sales)]);
 
   await ensureMonthTab(token, tab, sheets);
   await clearRange(token, tab, "A6:G100000");
   if (income.length) await patch(token, tab, `A6:G${5 + income.length}`, income);
   await patch(token, tab, "O5", [[refunds]]);
   await patch(token, tab, "O7", [[fees]]);
-  await patch(token, tab, "O8", [[postage]]);
-  await patch(token, tab, "O12", [[orderIds.size]]);
+  await patch(token, tab, "O8", [[ads]]);
+  await patch(token, tab, "O9", [[postage]]);
+  await patch(token, tab, "O13", [[orderIds.size]]);
   const accRows = [];
-  for (let i = 1; i <= 6; i++) { const p = perAcc[i] || { income: 0, fees: 0, feeCredits: 0 }; accRows.push([round2(p.income), round2(p.fees - p.feeCredits)]); }
-  await patch(token, tab, "R5:S10", accRows);
+  for (let i = 1; i <= 6; i++) { const p = perAcc[i] || { income: 0, fees: 0, ads: 0, feeCredits: 0 }; accRows.push([round2(p.income), round2(p.fees - p.feeCredits), round2(p.ads)]); }
+  await patch(token, tab, "R5:T10", accRows);
+  await clearRange(token, tab, "V6:X100");
+  if (best.length) await patch(token, tab, `V6:X${5 + best.length}`, best);
 
-  console.log(`${tab}: ${income.length} income rows, ${orderIds.size} orders, fees £${fees}, postage £${postage}, refunds £${refunds}`);
+  console.log(`${tab}: ${income.length} income rows, ${orderIds.size} orders, fees £${fees}, ads £${ads}, postage £${postage}, refunds £${refunds}`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
