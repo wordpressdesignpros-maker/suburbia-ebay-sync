@@ -130,34 +130,60 @@ async function main() {
   let refunds = 0, fees = 0, feeCredits = 0, postage = 0;
   const orderIds = new Set();
 
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const failed = [];
+
   for (const acc of ACCOUNTS) {
     const refresh = process.env[`EBAY_REFRESH_TOKEN_${acc.idx}`];
     perAcc[acc.idx] = { income: 0, fees: 0, feeCredits: 0 };
-    if (!refresh) { console.log(`Account ${acc.idx}: no token`); continue; }
-    try {
-      const access = await ebayAccessToken(refresh);
-      const orders = await ebayFetchOrders(access, since);
-      for (const o of orders) {
-        const cs = o.cancelStatus?.cancelState;
-        if (cs && cs !== "NONE_REQUESTED") continue;
-        orderIds.add(o.orderId);
-        for (const li of o.lineItems || []) {
-          const qty = li.quantity || 1;
-          const lineCost = parseFloat(li.lineItemCost?.value || 0);
-          const unit = qty ? round2(lineCost / qty) : lineCost;
-          income.push([ddmmyyyy(o.creationDate), li.title || "", qty, unit, round2(lineCost)]);
-          perAcc[acc.idx].income += lineCost;
+    if (!refresh) { failed.push(acc.idx); continue; }
+
+    let ok = false, lastErr;
+    for (let attempt = 1; attempt <= 3 && !ok; attempt++) {
+      try {
+        const access = await ebayAccessToken(refresh);
+        const orders = await ebayFetchOrders(access, since);
+        const txns = await ebayFetchTransactions(access, since);
+
+        // accumulate into locals first so a retry can never double-count
+        const localIncome = [], localIds = new Set();
+        let aInc = 0, aFees = 0, aCred = 0, aRef = 0, aPost = 0;
+        for (const o of orders) {
+          const cs = o.cancelStatus?.cancelState;
+          if (cs && cs !== "NONE_REQUESTED") continue;
+          localIds.add(o.orderId);
+          for (const li of o.lineItems || []) {
+            const qty = li.quantity || 1;
+            const lineCost = parseFloat(li.lineItemCost?.value || 0);
+            const unit = qty ? round2(lineCost / qty) : lineCost;
+            localIncome.push([ddmmyyyy(o.creationDate), li.title || "", qty, unit, round2(lineCost)]);
+            aInc += lineCost;
+          }
         }
+        for (const t of txns) {
+          if (t.transactionType === "SALE") aFees += feeAmount(t);
+          else if (t.transactionType === "NON_SALE_CHARGE") aFees += Math.abs(parseFloat(t.amount?.value || 0));
+          else if (t.transactionType === "SHIPPING_LABEL") aPost += Math.abs(parseFloat(t.amount?.value || 0));
+          else if (t.transactionType === "REFUND") { aRef += Math.abs(parseFloat(t.amount?.value || 0)); aCred += feeAmount(t); }
+        }
+
+        income.push(...localIncome);
+        for (const id of localIds) orderIds.add(id);
+        perAcc[acc.idx] = { income: aInc, fees: aFees, feeCredits: aCred };
+        fees += aFees; feeCredits += aCred; refunds += aRef; postage += aPost;
+        ok = true;
+        console.log(`Account ${acc.idx}: ${orders.length} orders, ${txns.length} txns`);
+      } catch (e) {
+        lastErr = e;
+        if (attempt < 3) await sleep(2500 * attempt);
       }
-      const txns = await ebayFetchTransactions(access, since);
-      for (const t of txns) {
-        if (t.transactionType === "SALE") { const f = feeAmount(t); fees += f; perAcc[acc.idx].fees += f; }
-        else if (t.transactionType === "NON_SALE_CHARGE") { const a = Math.abs(parseFloat(t.amount?.value || 0)); fees += a; perAcc[acc.idx].fees += a; }
-        else if (t.transactionType === "SHIPPING_LABEL") { postage += Math.abs(parseFloat(t.amount?.value || 0)); }
-        else if (t.transactionType === "REFUND") { refunds += Math.abs(parseFloat(t.amount?.value || 0)); const fc = feeAmount(t); feeCredits += fc; perAcc[acc.idx].feeCredits += fc; }
-      }
-      console.log(`Account ${acc.idx}: ${orders.length} orders, ${txns.length} txns`);
-    } catch (e) { console.error(`Account ${acc.idx} failed: ${e.message}`); }
+    }
+    if (!ok) { console.error(`Account ${acc.idx} failed after 3 attempts: ${lastErr && lastErr.message}`); failed.push(acc.idx); }
+  }
+
+  // Never overwrite good data with a partial result.
+  if (failed.length) {
+    throw new Error(`Aborting write — accounts [${failed.join(", ")}] could not be fetched this run; keeping the last complete figures.`);
   }
 
   income.sort((a, b) => dateKey(a[0]) - dateKey(b[0]));
