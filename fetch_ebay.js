@@ -9,6 +9,8 @@
 // Env (GitHub secrets): EBAY_APP_ID, EBAY_CERT_ID, EBAY_REFRESH_TOKEN_1..6,
 //   MS_CLIENT_ID, MS_TENANT_ID, MS_REFRESH_TOKEN, ONEDRIVE_FILE_ID
 
+const crypto = require("crypto");
+
 const ACCOUNTS = [1, 2, 3, 4, 5, 6].map((i) => ({ idx: i }));
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const STATE = "_state";
@@ -43,13 +45,36 @@ async function ebayFetchOrders(accessToken, sinceIso) {
   return orders;
 }
 
+// eBay digital signature (RFC 9421) for the Finances API. GET => no body, so
+// the covered components are x-ebay-signature-key, @method, @path, @authority.
+function signHeaders(method, pathOnly, authority) {
+  const jwe = process.env.EBAY_SIGNING_KEY;
+  const created = Math.floor(Date.now() / 1000);
+  const params = `("x-ebay-signature-key" "@method" "@path" "@authority");created=${created}`;
+  const base =
+    `"x-ebay-signature-key": ${jwe}\n` +
+    `"@method": ${method}\n` +
+    `"@path": ${pathOnly}\n` +
+    `"@authority": ${authority}\n` +
+    `"@signature-params": ${params}`;
+  const keyObj = crypto.createPrivateKey({ key: Buffer.from(process.env.EBAY_SIGNING_PRIVATE, "base64"), format: "der", type: "pkcs8" });
+  const sig = crypto.sign(null, Buffer.from(base, "utf8"), keyObj);
+  return {
+    "x-ebay-signature-key": jwe,
+    "Signature-Input": `sig1=${params}`,
+    "Signature": `sig1=:${sig.toString("base64")}:`,
+  };
+}
+
 async function ebayFetchTransactions(accessToken, sinceIso) {
   const txns = [];
   let url = `https://apiz.ebay.com/sell/finances/v1/transaction?${new URLSearchParams({
     filter: `transactionDate:[${sinceIso}..]`, limit: "200",
   })}`;
   while (url) {
-    const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } });
+    const u = new URL(url);
+    const sig = signHeaders("GET", u.pathname, u.host);
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", ...sig } });
     if (!r.ok) throw new Error(`eBay finances fetch failed: ${r.status} ${await r.text()}`);
     const j = await r.json();
     if (j.transactions) txns.push(...j.transactions);
