@@ -2,8 +2,8 @@ name: Poll eBay sales
 
 on:
   schedule:
-    # every 15 minutes
-    - cron: "*/15 * * * *"
+    # every 5 minutes
+    - cron: "*/5 * * * *"
   # allow manual triggering from the Actions tab
   workflow_dispatch:
 
