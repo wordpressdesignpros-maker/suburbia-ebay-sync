@@ -173,6 +173,10 @@ async function main() {
       const orders = await ebayFetchOrders(access, since);
       let added = 0;
       for (const o of orders) {
+        // skip cancelled or fully-refunded orders
+        const cs = o.cancelStatus?.cancelState;
+        if (cs && cs !== "NONE_REQUESTED") continue;
+        if (o.orderPaymentStatus === "FULLY_REFUNDED") continue;
         for (const li of o.lineItems || []) {
           const key = `${o.orderId}|${li.lineItemId}`;
           if (seen.has(key)) continue;
