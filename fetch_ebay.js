@@ -96,18 +96,18 @@ async function ensureMonthTab(token, name, existing) {
   if (existing.includes(name)) return;
   await gfetch(token, `${WB()}/worksheets/add`, { method: "POST", body: JSON.stringify({ name }) });
   await patch(token, name, "A2", [["INCOME"]]);
-  await patch(token, name, "G2", [["OTHER EXPENDITURE (you fill in)"]]);
-  await patch(token, name, "L2", [["SUMMARY"]]);
-  await patch(token, name, "O2", [["BY ACCOUNT"]]);
-  await patch(token, name, "A4:E4", [["DATE", "PRODUCT", "QUANTITY", "UNIT £", "TOTAL £"]]);
-  await patch(token, name, "G4:J4", [["DATE", "DESCRIPTION", "CATEGORY", "£"]]);
-  await patch(token, name, "O4:Q4", [["ACCOUNT", "INCOME £", "FEES £"]]);
-  await patch(token, name, "L4:M13", [
-    ["Item sales", "=SUM($E$6:$E$100000)"], ["Refunds (deducted)", 0], ["Net income", "=M4-M5"],
-    ["eBay fees", 0], ["Postage", 0], ["Other expenditure", "=SUM($J$6:$J$100000)"],
-    ["Net profit", "=M6-M7-M8-M9"], ["Profit margin", "=IF(M6=0,0,M10/M6)"], ["Orders", 0], ["Avg order value", "=IF(M12=0,0,M6/M12)"],
+  await patch(token, name, "I2", [["OTHER EXPENDITURE (you fill in)"]]);
+  await patch(token, name, "N2", [["SUMMARY"]]);
+  await patch(token, name, "Q2", [["BY ACCOUNT"]]);
+  await patch(token, name, "A4:G4", [["DATE", "CUSTOMER", "POSTCODE", "PRODUCT", "QUANTITY", "UNIT £", "TOTAL £"]]);
+  await patch(token, name, "I4:L4", [["DATE", "DESCRIPTION", "CATEGORY", "£"]]);
+  await patch(token, name, "Q4:S4", [["ACCOUNT", "INCOME £", "FEES £"]]);
+  await patch(token, name, "N4:O13", [
+    ["Item sales", "=SUM($G$6:$G$100000)"], ["Refunds (deducted)", 0], ["Net income", "=O4-O5"],
+    ["eBay fees", 0], ["Postage", 0], ["Other expenditure", "=SUM($L$6:$L$100000)"],
+    ["Net profit", "=O6-O7-O8-O9"], ["Profit margin", "=IF(O6=0,0,O10/O6)"], ["Orders", 0], ["Avg order value", "=IF(O12=0,0,O6/O12)"],
   ]);
-  await patch(token, name, "O5:O10", [["Account 1"], ["Account 2"], ["Account 3"], ["Account 4"], ["Account 5"], ["Account 6"]]);
+  await patch(token, name, "Q5:Q10", [["Account 1"], ["Account 2"], ["Account 3"], ["Account 4"], ["Account 5"], ["Account 6"]]);
   existing.push(name);
 }
 
@@ -152,11 +152,14 @@ async function main() {
           const cs = o.cancelStatus?.cancelState;
           if (cs && cs !== "NONE_REQUESTED") continue;
           localIds.add(o.orderId);
+          const ship = o.fulfillmentStartInstructions?.[0]?.shippingStep?.shipTo;
+          const customer = ship?.fullName || "";
+          const postcode = ship?.contactAddress?.postalCode || "";
           for (const li of o.lineItems || []) {
             const qty = li.quantity || 1;
             const lineCost = parseFloat(li.lineItemCost?.value || 0);
             const unit = qty ? round2(lineCost / qty) : lineCost;
-            localIncome.push([ddmmyyyy(o.creationDate), li.title || "", qty, unit, round2(lineCost)]);
+            localIncome.push([ddmmyyyy(o.creationDate), customer, postcode, li.title || "", qty, unit, round2(lineCost)]);
             aInc += lineCost;
           }
         }
@@ -190,15 +193,15 @@ async function main() {
   fees = round2(fees - feeCredits); refunds = round2(refunds); postage = round2(postage);
 
   await ensureMonthTab(token, tab, sheets);
-  await clearRange(token, tab, "A6:E100000");
-  if (income.length) await patch(token, tab, `A6:E${5 + income.length}`, income);
-  await patch(token, tab, "M5", [[refunds]]);
-  await patch(token, tab, "M7", [[fees]]);
-  await patch(token, tab, "M8", [[postage]]);
-  await patch(token, tab, "M12", [[orderIds.size]]);
+  await clearRange(token, tab, "A6:G100000");
+  if (income.length) await patch(token, tab, `A6:G${5 + income.length}`, income);
+  await patch(token, tab, "O5", [[refunds]]);
+  await patch(token, tab, "O7", [[fees]]);
+  await patch(token, tab, "O8", [[postage]]);
+  await patch(token, tab, "O12", [[orderIds.size]]);
   const accRows = [];
   for (let i = 1; i <= 6; i++) { const p = perAcc[i] || { income: 0, fees: 0, feeCredits: 0 }; accRows.push([round2(p.income), round2(p.fees - p.feeCredits)]); }
-  await patch(token, tab, "P5:Q10", accRows);
+  await patch(token, tab, "R5:S10", accRows);
 
   console.log(`${tab}: ${income.length} income rows, ${orderIds.size} orders, fees £${fees}, postage £${postage}, refunds £${refunds}`);
 }
