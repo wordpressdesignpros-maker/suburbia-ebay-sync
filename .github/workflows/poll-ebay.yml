@@ -2,7 +2,9 @@ name: Poll eBay sales
 
 on:
   schedule:
+    # every 15 minutes
     - cron: "*/15 * * * *"
+  # allow manual triggering from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -27,6 +29,8 @@ jobs:
           EBAY_REFRESH_TOKEN_4: ${{ secrets.EBAY_REFRESH_TOKEN_4 }}
           EBAY_REFRESH_TOKEN_5: ${{ secrets.EBAY_REFRESH_TOKEN_5 }}
           EBAY_REFRESH_TOKEN_6: ${{ secrets.EBAY_REFRESH_TOKEN_6 }}
+          EBAY_SIGNING_KEY: ${{ secrets.EBAY_SIGNING_KEY }}
+          EBAY_SIGNING_PRIVATE: ${{ secrets.EBAY_SIGNING_PRIVATE }}
           MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
           MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
           MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
