@@ -208,7 +208,7 @@ async function main() {
     throw new Error(`Aborting write — accounts [${failed.join(", ")}] could not be fetched this run; keeping the last complete figures.`);
   }
 
-  income.sort((a, b) => dateKey(a[0]) - dateKey(b[0]));
+  income.sort((a, b) => dateKey(b[0]) - dateKey(a[0])); // newest first (top), oldest last
   fees = round2(fees - feeCredits); ads = round2(ads); refunds = round2(refunds); postage = round2(postage);
 
   // best sellers: aggregate by product title across all accounts
