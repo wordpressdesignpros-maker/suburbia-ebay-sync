@@ -1,16 +1,23 @@
 name: Poll eBay sales
 
 on:
+  # Sparse cron (every ~6h) just RESTARTS the loop. Sparse schedules are
+  # honoured reliably by GitHub; the every-5-min granularity comes from the
+  # in-job loop below, not from cron.
   schedule:
-    # every 5 minutes
-    - cron: "*/5 * * * *"
-  # allow manual triggering from the Actions tab
+    - cron: "3 */6 * * *"
   workflow_dispatch:
+
+# Only one sync may run at a time. A queued restart starts the moment the
+# current loop finishes, so the hand-off is seamless.
+concurrency:
+  group: ebay-sync
+  cancel-in-progress: false
 
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -19,7 +26,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Run sync
+      - name: Sync every 5 minutes (loop ~5h40m, then a fresh run takes over)
         env:
           EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
           EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
@@ -36,4 +43,9 @@ jobs:
           MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
           MS_REFRESH_TOKEN: ${{ secrets.MS_REFRESH_TOKEN }}
           ONEDRIVE_FILE_ID: ${{ secrets.ONEDRIVE_FILE_ID }}
-        run: node fetch_ebay.js
+        run: |
+          for i in $(seq 1 68); do
+            echo "=== sync $i / 68 ==="
+            node fetch_ebay.js || echo "sync $i failed, will retry next cycle"
+            if [ "$i" -lt 68 ]; then sleep 300; fi
+          done
