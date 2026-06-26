@@ -100,9 +100,19 @@ async function msToken() {
 const FID = () => process.env.ONEDRIVE_FILE_ID;
 const WB = () => `https://graph.microsoft.com/v1.0/me/drive/items/${FID()}/workbook`;
 const wsPath = (n) => `${WB()}/worksheets('${encodeURIComponent(n)}')`;
-async function gfetch(token, url, opts = {}) {
+async function gfetch(token, url, opts = {}, attempt = 1) {
   const r = await fetch(url, { ...opts, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(opts.headers || {}) } });
-  if (!r.ok) throw new Error(`Graph ${opts.method || "GET"} -> ${r.status} ${(await r.text()).slice(0, 200)}`);
+  if (!r.ok) {
+    const body = (await r.text()).slice(0, 200);
+    // Transient Graph errors (503/500/429/locked) — back off and retry so a
+    // blip between a clear and a write can't leave a section blank.
+    const transient = r.status >= 500 || r.status === 429 || r.status === 423;
+    if (transient && attempt < 6) {
+      await new Promise((res) => setTimeout(res, 1500 * attempt));
+      return gfetch(token, url, opts, attempt + 1);
+    }
+    throw new Error(`Graph ${opts.method || "GET"} -> ${r.status} ${body}`);
+  }
   return r.status === 204 ? null : r.json();
 }
 const listSheets = async (token) => ((await gfetch(token, `${WB()}/worksheets?$select=name`)).value || []).map((w) => w.name);
@@ -226,8 +236,10 @@ async function main() {
     .map(([title, v]) => [title, v.qty, round2(v.sales)]);
 
   await ensureMonthTab(token, tab, sheets);
-  await clearRange(token, tab, "A6:G100000");
+  // Write rows FIRST, then clear only the rows below the new data. A failure
+  // can therefore never leave a populated section blank.
   if (income.length) await patch(token, tab, `A6:G${5 + income.length}`, income);
+  await clearRange(token, tab, `A${6 + income.length}:G100000`);
   await patch(token, tab, "O5", [[refunds]]);
   await patch(token, tab, "O7", [[fees]]);
   await patch(token, tab, "O8", [[ads]]);
@@ -236,8 +248,8 @@ async function main() {
   const accRows = [];
   for (let i = 1; i <= 6; i++) { const p = perAcc[i] || { income: 0, fees: 0, ads: 0, feeCredits: 0 }; accRows.push([round2(p.income), round2(p.fees - p.feeCredits), round2(p.ads)]); }
   await patch(token, tab, "R5:T10", accRows);
-  await clearRange(token, tab, "V6:X100");
   if (best.length) await patch(token, tab, `V6:X${5 + best.length}`, best);
+  await clearRange(token, tab, `V${6 + best.length}:X100`);
 
   console.log(`${tab}: ${income.length} income rows, ${orderIds.size} orders, fees £${fees}, ads £${ads}, postage £${postage}, refunds £${refunds}`);
 }
