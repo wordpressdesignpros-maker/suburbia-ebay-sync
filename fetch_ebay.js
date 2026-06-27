@@ -256,13 +256,10 @@ async function main() {
   accCombined.sort((a, b) => b[1] - a[1]);
   await patch(token, tab, "Q5:Q10", accCombined.map((r) => [r[0]]));
   await patch(token, tab, "R5:T10", accCombined.map((r) => [r[1], r[2], r[3]]));
-  // TOTAL line under the table (income, fees, ad fees)
-  const tot = (i) => round2(accCombined.reduce((s, r) => s + r[i], 0));
-  await patch(token, tab, "Q11:T11", [["TOTAL", tot(1), tot(2), tot(3)]]);
   try {
-    await gfetch(token, `${wsPath(tab)}/range(address='Q1:Q11')/format`, { method: "PATCH", body: JSON.stringify({ columnWidth: 150 }) });
-    await gfetch(token, `${wsPath(tab)}/range(address='R11:T11')`, { method: "PATCH", body: JSON.stringify({ numberFormat: [["£#,##0.00", "£#,##0.00", "£#,##0.00"]] }) });
-    await gfetch(token, `${wsPath(tab)}/range(address='Q11:T11')/format/font`, { method: "PATCH", body: JSON.stringify({ bold: true }) });
+    await gfetch(token, `${wsPath(tab)}/range(address='Q1:Q10')/format`, { method: "PATCH", body: JSON.stringify({ columnWidth: 150 }) });
+    // remove the old TOTAL row entirely (values + formatting)
+    await gfetch(token, `${wsPath(tab)}/range(address='Q11:T11')/clear`, { method: "POST", body: JSON.stringify({ applyTo: "All" }) });
   } catch (_) {}
   if (best.length) await patch(token, tab, `V6:X${5 + best.length}`, best);
   await clearRange(token, tab, `V${6 + best.length}:X100`);
