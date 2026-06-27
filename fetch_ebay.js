@@ -13,6 +13,8 @@
 const crypto = require("crypto");
 
 const ACCOUNTS = [1, 2, 3, 4, 5, 6].map((i) => ({ idx: i }));
+// Real eBay shop names for the BY ACCOUNT panel (slots 1-6).
+const ACCOUNT_NAMES = ["superfly", "aqualightingsolutions", "autolightingsolutions", "lightingdepot", "premiumlightingsolutions", "vividlighting"];
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const SCOPES = "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.finances";
 
@@ -136,7 +138,7 @@ async function ensureMonthTab(token, name, existing) {
     ["eBay fees", 0], ["Promoted/ad fees", 0], ["Postage", 0], ["Other expenditure", "=SUM($L$6:$L$100000)"],
     ["Net profit", "=O6-O7-O8-O9-O10"], ["Profit margin", "=IF(O6=0,0,O11/O6)"], ["Orders", 0], ["Avg order value", "=IF(O13=0,0,O6/O13)"],
   ]);
-  await patch(token, name, "Q5:Q10", [["Account 1"], ["Account 2"], ["Account 3"], ["Account 4"], ["Account 5"], ["Account 6"]]);
+  await patch(token, name, "Q5:Q10", ACCOUNT_NAMES.map((n) => [n]));
   existing.push(name);
 }
 
@@ -248,6 +250,8 @@ async function main() {
   const accRows = [];
   for (let i = 1; i <= 6; i++) { const p = perAcc[i] || { income: 0, fees: 0, ads: 0, feeCredits: 0 }; accRows.push([round2(p.income), round2(p.fees - p.feeCredits), round2(p.ads)]); }
   await patch(token, tab, "R5:T10", accRows);
+  await patch(token, tab, "Q5:Q10", ACCOUNT_NAMES.map((n) => [n]));
+  try { await gfetch(token, `${wsPath(tab)}/range(address='Q1:Q10')/format`, { method: "PATCH", body: JSON.stringify({ columnWidth: 150 }) }); } catch (_) {}
   if (best.length) await patch(token, tab, `V6:X${5 + best.length}`, best);
   await clearRange(token, tab, `V${6 + best.length}:X100`);
 
