@@ -153,6 +153,11 @@ async function main() {
   if (!FID()) throw new Error("ONEDRIVE_FILE_ID not set");
   const token = await msToken();
   const sheets = await listSheets(token);
+  // Strip the legacy TOTAL row (Q11:T11 — values + formatting) from EVERY tab,
+  // not just the current month, so no stale total lingers on other months.
+  for (const s of sheets) {
+    try { await gfetch(token, `${wsPath(s)}/range(address='Q11:T11')/clear`, { method: "POST", body: JSON.stringify({ applyTo: "All" }) }); } catch (_) {}
+  }
   const since = monthStartIso();
   const tab = tabFor(new Date().toISOString());
 
