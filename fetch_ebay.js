@@ -142,11 +142,33 @@ async function ensureMonthTab(token, name, existing) {
   existing.push(name);
 }
 
-const ddmmyyyy = (iso) => { const d = new Date(iso); const p = (n) => String(n).padStart(2, "0"); return `${p(d.getUTCDate())}.${p(d.getUTCMonth() + 1)}.${d.getUTCFullYear()}`; };
-const tabFor = (iso) => { const d = new Date(iso); return `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`; };
+// All day/month bucketing uses UK local time (Europe/London) so a sale made
+// just after midnight BST lands on the correct UK day/month, not the UTC one
+// (the GitHub runner clock is UTC, an hour behind during British Summer Time).
+const TZ = "Europe/London";
+function londonParts(date) {
+  if (!(date instanceof Date) || isNaN(date)) date = new Date(); // guard bad/missing dates
+  const f = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const o = {};
+  for (const p of f.formatToParts(date)) if (p.type !== "literal") o[p.type] = p.value;
+  if (o.hour === "24") o.hour = "00";
+  return o;
+}
+// Convert a London wall-clock time to the matching UTC ISO instant (BST/GMT aware).
+function londonWallToUtcIso(y, mo, d, h, mi, s) {
+  const wanted = Date.UTC(y, mo - 1, d, h, mi, s);
+  const lp = londonParts(new Date(wanted));
+  const shown = Date.UTC(+lp.year, +lp.month - 1, +lp.day, +lp.hour, +lp.minute, +lp.second);
+  const offset = shown - wanted; // how far London is ahead of UTC at that instant
+  return new Date(wanted - offset).toISOString();
+}
+const ddmmyyyy = (iso) => { const p = londonParts(new Date(iso)); return `${p.day}.${p.month}.${p.year}`; };
+const tabFor = (iso) => { const p = londonParts(new Date(iso)); return `${MONTHS[+p.month - 1]} ${p.year}`; };
 const dateKey = (s) => { const [d, m, y] = String(s).split("."); return (+y) * 10000 + (+m) * 100 + (+d); };
 const round2 = (n) => Math.round(n * 100) / 100;
-const monthStartIso = () => { const n = new Date(); return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), 1)).toISOString(); };
+// Fetch from the start of the PREVIOUS UK month, so at a month boundary we
+// rebuild both months correctly (current + the one just ended).
+const rangeStartIso = () => { const p = londonParts(new Date()); let y = +p.year, mo = +p.month - 1; if (mo < 1) { mo = 12; y -= 1; } return londonWallToUtcIso(y, mo, 1, 0, 0, 0); };
 
 // ---------------------------------------------------------------- main
 async function main() {
@@ -158,20 +180,18 @@ async function main() {
   for (const s of sheets) {
     try { await gfetch(token, `${wsPath(s)}/range(address='Q11:T11')/clear`, { method: "POST", body: JSON.stringify({ applyTo: "All" }) }); } catch (_) {}
   }
-  const since = monthStartIso();
-  const tab = tabFor(new Date().toISOString());
+  const since = rangeStartIso();
 
-  const income = [];
-  const perAcc = {};
-  let refunds = 0, fees = 0, ads = 0, feeCredits = 0, postage = 0;
-  const orderIds = new Set();
+  // Every order / transaction is bucketed into its UK-month tab, so a run that
+  // spans a month boundary rebuilds BOTH months correctly.
+  const byMonth = {};
+  const bucket = (tab) => (byMonth[tab] ||= { income: [], perAcc: {}, refunds: 0, fees: 0, ads: 0, feeCredits: 0, postage: 0, orderIds: new Set() });
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const failed = [];
 
   for (const acc of ACCOUNTS) {
     const refresh = process.env[`EBAY_REFRESH_TOKEN_${acc.idx}`];
-    perAcc[acc.idx] = { income: 0, fees: 0, ads: 0, feeCredits: 0 };
     if (!refresh) { failed.push(acc.idx); continue; }
 
     let ok = false, lastErr;
@@ -181,13 +201,14 @@ async function main() {
         const orders = await ebayFetchOrders(access, since);
         const txns = await ebayFetchTransactions(access, since);
 
-        // accumulate into locals first so a retry can never double-count
-        const localIncome = [], localIds = new Set();
-        let aInc = 0, aFees = 0, aAds = 0, aCred = 0, aRef = 0, aPost = 0;
+        // accumulate into a local per-month map so a retry can never double-count
+        const lm = {};
+        const lb = (tab) => (lm[tab] ||= { income: [], ids: new Set(), inc: 0, fees: 0, ads: 0, cred: 0, ref: 0, post: 0 });
         for (const o of orders) {
           const cs = o.cancelStatus?.cancelState;
           if (cs && cs !== "NONE_REQUESTED") continue;
-          localIds.add(o.orderId);
+          const b = lb(tabFor(o.creationDate));
+          b.ids.add(o.orderId);
           const ship = o.fulfillmentStartInstructions?.[0]?.shippingStep?.shipTo;
           const customer = ship?.fullName || "";
           const postcode = ship?.contactAddress?.postalCode || "";
@@ -195,21 +216,26 @@ async function main() {
             const qty = li.quantity || 1;
             const lineCost = parseFloat(li.lineItemCost?.value || 0);
             const unit = qty ? round2(lineCost / qty) : lineCost;
-            localIncome.push([ddmmyyyy(o.creationDate), customer, postcode, li.title || "", qty, unit, round2(lineCost)]);
-            aInc += lineCost;
+            b.income.push([ddmmyyyy(o.creationDate), customer, postcode, li.title || "", qty, unit, round2(lineCost)]);
+            b.inc += lineCost;
           }
         }
         for (const t of txns) {
-          if (t.transactionType === "SALE") { const s = splitFees(t); aFees += s.sell; aAds += s.ad; }
-          else if (t.transactionType === "NON_SALE_CHARGE") { const amt = Math.abs(parseFloat(t.amount?.value || 0)); if (isAdFee(t.feeType)) aAds += amt; else aFees += amt; }
-          else if (t.transactionType === "SHIPPING_LABEL") aPost += Math.abs(parseFloat(t.amount?.value || 0));
-          else if (t.transactionType === "REFUND") { aRef += Math.abs(parseFloat(t.amount?.value || 0)); aCred += feeAmount(t); }
+          const b = lb(tabFor(t.transactionDate));
+          if (t.transactionType === "SALE") { const s = splitFees(t); b.fees += s.sell; b.ads += s.ad; }
+          else if (t.transactionType === "NON_SALE_CHARGE") { const amt = Math.abs(parseFloat(t.amount?.value || 0)); if (isAdFee(t.feeType)) b.ads += amt; else b.fees += amt; }
+          else if (t.transactionType === "SHIPPING_LABEL") b.post += Math.abs(parseFloat(t.amount?.value || 0));
+          else if (t.transactionType === "REFUND") { b.ref += Math.abs(parseFloat(t.amount?.value || 0)); b.cred += feeAmount(t); }
         }
 
-        income.push(...localIncome);
-        for (const id of localIds) orderIds.add(id);
-        perAcc[acc.idx] = { income: aInc, fees: aFees, ads: aAds, feeCredits: aCred };
-        fees += aFees; ads += aAds; feeCredits += aCred; refunds += aRef; postage += aPost;
+        // commit this account's locals into the global per-month buckets
+        for (const tab of Object.keys(lm)) {
+          const L = lm[tab], g = bucket(tab);
+          g.income.push(...L.income);
+          for (const id of L.ids) g.orderIds.add(id);
+          g.perAcc[acc.idx] = { income: L.inc, fees: L.fees, ads: L.ads, feeCredits: L.cred };
+          g.fees += L.fees; g.ads += L.ads; g.feeCredits += L.cred; g.refunds += L.ref; g.postage += L.post;
+        }
         ok = true;
         console.log(`Account ${acc.idx}: ${orders.length} orders, ${txns.length} txns`);
       } catch (e) {
@@ -225,51 +251,54 @@ async function main() {
     throw new Error(`Aborting write — accounts [${failed.join(", ")}] could not be fetched this run; keeping the last complete figures.`);
   }
 
-  income.sort((a, b) => dateKey(b[0]) - dateKey(a[0])); // newest first (top), oldest last
-  fees = round2(fees - feeCredits); ads = round2(ads); refunds = round2(refunds); postage = round2(postage);
+  for (const tab of Object.keys(byMonth)) {
+    const M = byMonth[tab];
+    M.income.sort((a, b) => dateKey(b[0]) - dateKey(a[0])); // newest first (top), oldest last
+    const fees = round2(M.fees - M.feeCredits), ads = round2(M.ads), refunds = round2(M.refunds), postage = round2(M.postage);
 
-  // best sellers: aggregate by product title across all accounts
-  const prodMap = new Map();
-  for (const r of income) {
-    const title = r[3] || "(no title)";
-    const cur = prodMap.get(title) || { qty: 0, sales: 0 };
-    cur.qty += Number(r[4]) || 0;
-    cur.sales += Number(r[6]) || 0;
-    prodMap.set(title, cur);
+    // best sellers: aggregate by product title across all accounts
+    const prodMap = new Map();
+    for (const r of M.income) {
+      const title = r[3] || "(no title)";
+      const cur = prodMap.get(title) || { qty: 0, sales: 0 };
+      cur.qty += Number(r[4]) || 0;
+      cur.sales += Number(r[6]) || 0;
+      prodMap.set(title, cur);
+    }
+    const best = [...prodMap.entries()]
+      .sort((a, b) => b[1].qty - a[1].qty || b[1].sales - a[1].sales)
+      .slice(0, 15)
+      .map(([title, v]) => [title, v.qty, round2(v.sales)]);
+
+    await ensureMonthTab(token, tab, sheets);
+    // Write rows FIRST, then clear only the rows below the new data. A failure
+    // can therefore never leave a populated section blank.
+    if (M.income.length) await patch(token, tab, `A6:G${5 + M.income.length}`, M.income);
+    await clearRange(token, tab, `A${6 + M.income.length}:G100000`);
+    await patch(token, tab, "O5", [[refunds]]);
+    await patch(token, tab, "O7", [[fees]]);
+    await patch(token, tab, "O8", [[ads]]);
+    await patch(token, tab, "O9", [[postage]]);
+    await patch(token, tab, "O13", [[M.orderIds.size]]);
+    // per-account rows: [name, income, fees, adFees] — sorted by highest income
+    const accCombined = [];
+    for (let i = 1; i <= 6; i++) {
+      const p = M.perAcc[i] || { income: 0, fees: 0, ads: 0, feeCredits: 0 };
+      accCombined.push([ACCOUNT_NAMES[i - 1], round2(p.income), round2(p.fees - p.feeCredits), round2(p.ads)]);
+    }
+    accCombined.sort((a, b) => b[1] - a[1]);
+    await patch(token, tab, "Q5:Q10", accCombined.map((r) => [r[0]]));
+    await patch(token, tab, "R5:T10", accCombined.map((r) => [r[1], r[2], r[3]]));
+    try {
+      await gfetch(token, `${wsPath(tab)}/range(address='Q1:Q10')/format`, { method: "PATCH", body: JSON.stringify({ columnWidth: 150 }) });
+      // remove the old TOTAL row entirely (values + formatting)
+      await gfetch(token, `${wsPath(tab)}/range(address='Q11:T11')/clear`, { method: "POST", body: JSON.stringify({ applyTo: "All" }) });
+    } catch (_) {}
+    if (best.length) await patch(token, tab, `V6:X${5 + best.length}`, best);
+    await clearRange(token, tab, `V${6 + best.length}:X100`);
+
+    console.log(`${tab}: ${M.income.length} income rows, ${M.orderIds.size} orders, fees £${fees}, ads £${ads}, postage £${postage}, refunds £${refunds}`);
   }
-  const best = [...prodMap.entries()]
-    .sort((a, b) => b[1].qty - a[1].qty || b[1].sales - a[1].sales)
-    .slice(0, 15)
-    .map(([title, v]) => [title, v.qty, round2(v.sales)]);
-
-  await ensureMonthTab(token, tab, sheets);
-  // Write rows FIRST, then clear only the rows below the new data. A failure
-  // can therefore never leave a populated section blank.
-  if (income.length) await patch(token, tab, `A6:G${5 + income.length}`, income);
-  await clearRange(token, tab, `A${6 + income.length}:G100000`);
-  await patch(token, tab, "O5", [[refunds]]);
-  await patch(token, tab, "O7", [[fees]]);
-  await patch(token, tab, "O8", [[ads]]);
-  await patch(token, tab, "O9", [[postage]]);
-  await patch(token, tab, "O13", [[orderIds.size]]);
-  // per-account rows: [name, income, fees, adFees] — sorted by highest income
-  const accCombined = [];
-  for (let i = 1; i <= 6; i++) {
-    const p = perAcc[i] || { income: 0, fees: 0, ads: 0, feeCredits: 0 };
-    accCombined.push([ACCOUNT_NAMES[i - 1], round2(p.income), round2(p.fees - p.feeCredits), round2(p.ads)]);
-  }
-  accCombined.sort((a, b) => b[1] - a[1]);
-  await patch(token, tab, "Q5:Q10", accCombined.map((r) => [r[0]]));
-  await patch(token, tab, "R5:T10", accCombined.map((r) => [r[1], r[2], r[3]]));
-  try {
-    await gfetch(token, `${wsPath(tab)}/range(address='Q1:Q10')/format`, { method: "PATCH", body: JSON.stringify({ columnWidth: 150 }) });
-    // remove the old TOTAL row entirely (values + formatting)
-    await gfetch(token, `${wsPath(tab)}/range(address='Q11:T11')/clear`, { method: "POST", body: JSON.stringify({ applyTo: "All" }) });
-  } catch (_) {}
-  if (best.length) await patch(token, tab, `V6:X${5 + best.length}`, best);
-  await clearRange(token, tab, `V${6 + best.length}:X100`);
-
-  console.log(`${tab}: ${income.length} income rows, ${orderIds.size} orders, fees £${fees}, ads £${ads}, postage £${postage}, refunds £${refunds}`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
