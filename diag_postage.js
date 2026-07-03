@@ -51,11 +51,17 @@ async function main() {
     catch (e) { console.log(`\nACC${i} ${ACCOUNT_NAMES[i - 1]}: ERROR ${e.message}`); continue; }
 
     const byType = {};        // transactionType/bookingEntry -> sum
+    const byFeeType = {};     // transactionType/feeType/bookingEntry -> {sum,n} (June only)
     const labels = [];        // shipping-label rows
     for (const t of txns) {
       const amt = parseFloat(t.amount?.value || 0);
       const key = `${t.transactionType}/${t.bookingEntry || "?"}`;
       byType[key] = r2((byType[key] || 0) + amt);
+      if (ukMonth(t.transactionDate) === "2026-06") {
+        const fk = `${t.transactionType}/${t.feeType || "(none)"}/${t.bookingEntry || "?"}`;
+        const e = (byFeeType[fk] ||= { sum: 0, n: 0 });
+        e.sum = r2(e.sum + amt); e.n++;
+      }
       if (t.transactionType === "SHIPPING_LABEL") {
         labels.push({ m: ukMonth(t.transactionDate), amt, be: t.bookingEntry || "?", ft: t.feeType || "", d: (t.transactionDate || "").slice(0, 10) });
       }
@@ -69,6 +75,7 @@ async function main() {
     }
     console.log(`\nACC${i} ${ACCOUNT_NAMES[i - 1]}: ${txns.length} txns, ${labels.length} shipping-label rows`);
     console.log(`  byType: ${JSON.stringify(byType)}`);
+    console.log(`  June by feeType: ${JSON.stringify(byFeeType)}`);
     console.log(`  postage by month (curAbs=current method, signed=debit-credit): ${JSON.stringify(sums)}`);
     const credits = labels.filter((l) => l.be === "CREDIT");
     if (credits.length) console.log(`  CREDIT (void/refunded) labels: ${JSON.stringify(credits)}`);
