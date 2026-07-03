@@ -222,9 +222,14 @@ async function main() {
         }
         for (const t of txns) {
           const b = lb(tabFor(t.transactionDate));
+          // bookingEntry CREDIT = money back to the seller (a voided label, a
+          // refunded fee) so it must SUBTRACT, not add. Ignoring the sign was
+          // over-stating postage and fees whenever a label/charge was reversed.
+          const sgn = t.bookingEntry === "CREDIT" ? -1 : 1;
+          const signed = sgn * Math.abs(parseFloat(t.amount?.value || 0));
           if (t.transactionType === "SALE") { const s = splitFees(t); b.fees += s.sell; b.ads += s.ad; }
-          else if (t.transactionType === "NON_SALE_CHARGE") { const amt = Math.abs(parseFloat(t.amount?.value || 0)); if (isAdFee(t.feeType)) b.ads += amt; else b.fees += amt; }
-          else if (t.transactionType === "SHIPPING_LABEL") b.post += Math.abs(parseFloat(t.amount?.value || 0));
+          else if (t.transactionType === "NON_SALE_CHARGE") { if (isAdFee(t.feeType)) b.ads += signed; else b.fees += signed; }
+          else if (t.transactionType === "SHIPPING_LABEL") b.post += signed;
           else if (t.transactionType === "REFUND") { b.ref += Math.abs(parseFloat(t.amount?.value || 0)); b.cred += feeAmount(t); }
         }
 
