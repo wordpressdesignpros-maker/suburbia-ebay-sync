@@ -304,6 +304,25 @@ async function main() {
 
     console.log(`${tab}: ${M.income.length} income rows, ${M.orderIds.size} orders, fees £${fees}, ads £${ads}, postage £${postage}, refunds £${refunds}`);
   }
+
+  // Make the workbook open on the current UK month. Excel shows whichever sheet
+  // sits in the first position, so order the tabs as [current month, upcoming
+  // months, past months, Year] every run. This tracks forward automatically.
+  try {
+    const curTab = tabFor(new Date().toISOString());
+    const key = (n) => { const [mon, yr] = n.split(" "); return (+yr) * 12 + MONTHS.indexOf(mon); };
+    const monthTabs = sheets.filter((n) => /^[A-Za-z]{3} \d{4}$/.test(n) && MONTHS.includes(n.slice(0, 3)));
+    const yearTabs = sheets.filter((n) => /^Year /.test(n));
+    const curKey = key(curTab);
+    const future = monthTabs.filter((n) => key(n) > curKey).sort((a, b) => key(a) - key(b));
+    const past = monthTabs.filter((n) => key(n) < curKey).sort((a, b) => key(a) - key(b));
+    const cur = monthTabs.filter((n) => key(n) === curKey);
+    const ordered = [...cur, ...future, ...past, ...yearTabs];
+    for (let i = 0; i < ordered.length; i++) {
+      await gfetch(token, wsPath(ordered[i]), { method: "PATCH", body: JSON.stringify({ position: i }) });
+    }
+    try { await gfetch(token, `${wsPath(curTab)}/activate`, { method: "POST" }); } catch (_) {}
+  } catch (_) {}
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
