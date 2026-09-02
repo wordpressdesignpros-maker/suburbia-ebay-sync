@@ -216,7 +216,9 @@ async function main() {
             const qty = li.quantity || 1;
             const lineCost = parseFloat(li.lineItemCost?.value || 0);
             const unit = qty ? round2(lineCost / qty) : lineCost;
-            b.income.push([ddmmyyyy(o.creationDate), customer, postcode, li.title || "", qty, unit, round2(lineCost)]);
+            const row = [ddmmyyyy(o.creationDate), customer, postcode, li.title || "", qty, unit, round2(lineCost)];
+            row._ts = Date.parse(o.creationDate) || 0; // sort key only, never written to the sheet
+            b.income.push(row);
             b.inc += lineCost;
           }
         }
@@ -258,7 +260,7 @@ async function main() {
 
   for (const tab of Object.keys(byMonth)) {
     const M = byMonth[tab];
-    M.income.sort((a, b) => dateKey(b[0]) - dateKey(a[0])); // newest first (top), oldest last
+    M.income.sort((a, b) => (a._ts - b._ts) || (dateKey(a[0]) - dateKey(b[0]))); // oldest first: the 1st of the month sits at the top
     const fees = round2(M.fees - M.feeCredits), ads = round2(M.ads), refunds = round2(M.refunds), postage = round2(M.postage);
 
     // best sellers: aggregate by product title across all accounts
