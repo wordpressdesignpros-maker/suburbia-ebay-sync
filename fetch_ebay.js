@@ -218,6 +218,7 @@ async function main() {
             const unit = qty ? round2(lineCost / qty) : lineCost;
             const row = [ddmmyyyy(o.creationDate), customer, postcode, li.title || "", qty, unit, round2(lineCost)];
             row._ts = Date.parse(o.creationDate) || 0; // sort key only, never written to the sheet
+            row._oid = o.orderId; // for the TODAY counter, never written to the sheet
             b.income.push(row);
             b.inc += lineCost;
           }
@@ -303,6 +304,25 @@ async function main() {
     } catch (_) {}
     if (best.length) await patch(token, tab, `V6:X${5 + best.length}`, best);
     await clearRange(token, tab, `V${6 + best.length}:X100`);
+
+    // TODAY panel in row 1 (D1:G1) on the current UK month tab only: orders and
+    // sales value so far today, refreshed every sync. Cleared on other tabs so a
+    // stale figure never lingers on a closed month.
+    const nowIso = new Date().toISOString();
+    if (tab === tabFor(nowIso)) {
+      const todayStr = ddmmyyyy(nowIso);
+      const todayRows = M.income.filter((r) => r[0] === todayStr);
+      const todayOrders = new Set(todayRows.map((r) => r._oid)).size;
+      const todayValue = round2(todayRows.reduce((sum, r) => sum + (Number(r[6]) || 0), 0));
+      await patch(token, tab, "D1:G1", [["TODAY  (orders / value)", "", todayOrders, todayValue]]);
+      try {
+        await gfetch(token, `${wsPath(tab)}/range(address='G1')`, { method: "PATCH", body: JSON.stringify({ numberFormat: [["£#,##0.00"]] }) });
+        await gfetch(token, `${wsPath(tab)}/range(address='D1:G1')/format/font`, { method: "PATCH", body: JSON.stringify({ bold: true }) });
+        await gfetch(token, `${wsPath(tab)}/range(address='D1')/format`, { method: "PATCH", body: JSON.stringify({ horizontalAlignment: "Right" }) });
+      } catch (_) {}
+    } else {
+      await clearRange(token, tab, "D1:G1");
+    }
 
     console.log(`${tab}: ${M.income.length} income rows, ${M.orderIds.size} orders, fees £${fees}, ads £${ads}, postage £${postage}, refunds £${refunds}`);
   }
