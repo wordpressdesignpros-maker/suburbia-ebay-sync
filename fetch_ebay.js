@@ -305,23 +305,25 @@ async function main() {
     if (best.length) await patch(token, tab, `V6:X${5 + best.length}`, best);
     await clearRange(token, tab, `V${6 + best.length}:X100`);
 
-    // TODAY panel in row 1 (D1:G1) on the current UK month tab only: orders and
-    // sales value so far today, refreshed every sync. Cleared on other tabs so a
-    // stale figure never lingers on a closed month.
-    const nowIso = new Date().toISOString();
-    if (tab === tabFor(nowIso)) {
-      const todayStr = ddmmyyyy(nowIso);
-      const todayRows = M.income.filter((r) => r[0] === todayStr);
-      const todayOrders = new Set(todayRows.map((r) => r._oid)).size;
-      const todayValue = round2(todayRows.reduce((sum, r) => sum + (Number(r[6]) || 0), 0));
-      await patch(token, tab, "D1:G1", [["TODAY  (orders / value)", "", todayOrders, todayValue]]);
-      try {
-        await gfetch(token, `${wsPath(tab)}/range(address='G1')`, { method: "PATCH", body: JSON.stringify({ numberFormat: [["£#,##0.00"]] }) });
-        await gfetch(token, `${wsPath(tab)}/range(address='D1:G1')/format/font`, { method: "PATCH", body: JSON.stringify({ bold: true }) });
-        await gfetch(token, `${wsPath(tab)}/range(address='D1')/format`, { method: "PATCH", body: JSON.stringify({ horizontalAlignment: "Right" }) });
-      } catch (_) {}
-    } else {
-      await clearRange(token, tab, "D1:G1");
+    // TODAY panel inside the SUMMARY box (N15:O16, under Avg order value) on the
+    // current UK month tab only: orders and sales value so far today, refreshed
+    // every sync; cleared on other tabs. Row 1 is off limits (merged title cell).
+    // Fully wrapped: a cosmetic write must never be able to break the order sync.
+    try {
+      const nowIso = new Date().toISOString();
+      if (tab === tabFor(nowIso)) {
+        const todayStr = ddmmyyyy(nowIso);
+        const todayRows = M.income.filter((r) => r[0] === todayStr);
+        const todayOrders = new Set(todayRows.map((r) => r._oid)).size;
+        const todayValue = round2(todayRows.reduce((sum, r) => sum + (Number(r[6]) || 0), 0));
+        await patch(token, tab, "N15:O16", [["Today's orders", todayOrders], ["Today's sales", todayValue]]);
+        await gfetch(token, `${wsPath(tab)}/range(address='O16')`, { method: "PATCH", body: JSON.stringify({ numberFormat: [["£#,##0.00"]] }) });
+        await gfetch(token, `${wsPath(tab)}/range(address='N15:O16')/format/font`, { method: "PATCH", body: JSON.stringify({ bold: true }) });
+      } else {
+        await clearRange(token, tab, "N15:O16");
+      }
+    } catch (e) {
+      console.log(`today panel skipped: ${e.message}`);
     }
 
     console.log(`${tab}: ${M.income.length} income rows, ${M.orderIds.size} orders, fees £${fees}, ads £${ads}, postage £${postage}, refunds £${refunds}`);
