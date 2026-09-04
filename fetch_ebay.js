@@ -319,7 +319,7 @@ async function main() {
         // Row 15 stays blank as a spacer under Avg order value; the panel sits in N16:O17
         await clearRange(token, tab, "N15:O15");
         await patch(token, tab, "N16:O17", [["Today's orders", todayOrders], ["Today's sales", todayValue]]);
-        await gfetch(token, `${wsPath(tab)}/range(address='O17')`, { method: "PATCH", body: JSON.stringify({ numberFormat: [["£#,##0.00"]] }) });
+        await gfetch(token, `${wsPath(tab)}/range(address='O16:O17')`, { method: "PATCH", body: JSON.stringify({ numberFormat: [["0"], ["£#,##0.00"]] }) });
         await gfetch(token, `${wsPath(tab)}/range(address='N16:O17')/format/font`, { method: "PATCH", body: JSON.stringify({ bold: true }) });
         // Same fill as today's order rows: read the colour from the income area's
         // conditional format rule so the panel always matches whatever is set there
