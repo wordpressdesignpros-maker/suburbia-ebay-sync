@@ -316,11 +316,25 @@ async function main() {
         const todayRows = M.income.filter((r) => r[0] === todayStr);
         const todayOrders = new Set(todayRows.map((r) => r._oid)).size;
         const todayValue = round2(todayRows.reduce((sum, r) => sum + (Number(r[6]) || 0), 0));
-        await patch(token, tab, "N15:O16", [["Today's orders", todayOrders], ["Today's sales", todayValue]]);
-        await gfetch(token, `${wsPath(tab)}/range(address='O16')`, { method: "PATCH", body: JSON.stringify({ numberFormat: [["£#,##0.00"]] }) });
-        await gfetch(token, `${wsPath(tab)}/range(address='N15:O16')/format/font`, { method: "PATCH", body: JSON.stringify({ bold: true }) });
+        // Row 15 stays blank as a spacer under Avg order value; the panel sits in N16:O17
+        await clearRange(token, tab, "N15:O15");
+        await patch(token, tab, "N16:O17", [["Today's orders", todayOrders], ["Today's sales", todayValue]]);
+        await gfetch(token, `${wsPath(tab)}/range(address='O17')`, { method: "PATCH", body: JSON.stringify({ numberFormat: [["£#,##0.00"]] }) });
+        await gfetch(token, `${wsPath(tab)}/range(address='N16:O17')/format/font`, { method: "PATCH", body: JSON.stringify({ bold: true }) });
+        // Same fill as today's order rows: read the colour from the income area's
+        // conditional format rule so the panel always matches whatever is set there
+        let fill = "#FFF2CC";
+        try {
+          const cfs = await gfetch(token, `${wsPath(tab)}/range(address='A6')/conditionalFormats`);
+          const custom = ((cfs && cfs.value) || []).find((c) => String(c.type).toLowerCase() === "custom");
+          if (custom) {
+            const f = await gfetch(token, `${wsPath(tab)}/range(address='A6')/conditionalFormats/${encodeURIComponent(custom.id)}/custom/format/fill`);
+            if (f && f.color) fill = f.color;
+          }
+        } catch (_) {}
+        await gfetch(token, `${wsPath(tab)}/range(address='N16:O17')/format/fill`, { method: "PATCH", body: JSON.stringify({ color: fill }) });
       } else {
-        await clearRange(token, tab, "N15:O16");
+        await gfetch(token, `${wsPath(tab)}/range(address='N15:O17')/clear`, { method: "POST", body: JSON.stringify({ applyTo: "All" }) });
       }
     } catch (e) {
       console.log(`today panel skipped: ${e.message}`);
