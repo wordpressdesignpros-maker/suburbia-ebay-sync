@@ -1,0 +1,63 @@
+name: Rotate eBay token
+
+# Re-authorise one eBay account without touching repository secrets.
+# 1. Open the SuburbiaSync consent link, sign in to THAT store, click Agree.
+# 2. Copy the code from the redirect URL (the whole URL is fine too).
+# 3. Run this workflow with the account slot and the code, within 5 minutes.
+# The job exchanges the code using the EBAY_CERT_ID secret, verifies the new
+# refresh token, and commits it encrypted to tokens/<slot>.enc. The next
+# "Poll eBay sales" run picks it up automatically.
+on:
+  workflow_dispatch:
+    inputs:
+      account:
+        description: "Account slot"
+        required: true
+        type: choice
+        options:
+          - "1 superfly"
+          - "2 aqualightingsolutions"
+          - "3 autolightingsolutions"
+          - "4 lightingdepot"
+          - "5 premiumlightingsolutions"
+          - "6 vividlighting"
+      code:
+        description: "Authorisation code from the eBay consent redirect (valid ~5 minutes)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Exchange the code and store the encrypted token
+        env:
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+          EBAY_SIGNING_PRIVATE: ${{ secrets.EBAY_SIGNING_PRIVATE }}
+          ACCOUNT: ${{ inputs.account }}
+          AUTH_CODE: ${{ inputs.code }}
+        run: node rotate_token.js
+
+      - name: Commit the token file
+        env:
+          ACCOUNT: ${{ inputs.account }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tokens
+          git commit -m "Rotate eBay refresh token for slot ${ACCOUNT}"
+          git pull --rebase
+          git push
