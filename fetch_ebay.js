@@ -254,9 +254,16 @@ async function main() {
     if (!ok) { console.error(`Account ${acc.idx} failed after 3 attempts: ${lastErr && lastErr.message}`); failed.push(acc.idx); }
   }
 
-  // Never overwrite good data with a partial result.
-  if (failed.length) {
+  // One dead token (e.g. after a password change on that eBay account) must
+  // not freeze the whole sheet. If a single account fails, write the other
+  // five and flag the failed one in BY ACCOUNT; its rows and figures are
+  // simply missing until it is re-authorised. Anything wider looks like an
+  // eBay outage, so abort rather than wipe good data.
+  if (failed.length > 1) {
     throw new Error(`Aborting write — accounts [${failed.join(", ")}] could not be fetched this run; keeping the last complete figures.`);
+  }
+  if (failed.length) {
+    console.warn(`Account ${failed[0]} (${ACCOUNT_NAMES[failed[0] - 1]}) not synced this run: its token needs re-authorising (update EBAY_REFRESH_TOKEN_${failed[0]}). Writing the other accounts.`);
   }
 
   for (const tab of Object.keys(byMonth)) {
@@ -292,7 +299,8 @@ async function main() {
     const accCombined = [];
     for (let i = 1; i <= 6; i++) {
       const p = M.perAcc[i] || { income: 0, fees: 0, ads: 0, feeCredits: 0 };
-      accCombined.push([ACCOUNT_NAMES[i - 1], round2(p.income), round2(p.fees - p.feeCredits), round2(p.ads)]);
+      const label = failed.includes(i) ? `${ACCOUNT_NAMES[i - 1]} (NOT SYNCED: re-authorise)` : ACCOUNT_NAMES[i - 1];
+      accCombined.push([label, round2(p.income), round2(p.fees - p.feeCredits), round2(p.ads)]);
     }
     accCombined.sort((a, b) => b[1] - a[1]);
     await patch(token, tab, "Q5:Q10", accCombined.map((r) => [r[0]]));
