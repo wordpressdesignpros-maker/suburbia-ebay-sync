@@ -11,12 +11,13 @@
 // eBay fees, ad fees, postage and refunds are running totals from the ledger.
 
 const crypto = require("crypto");
+const { SCOPES, refreshTokenFor } = require("./vault");
 
 const ACCOUNTS = [1, 2, 3, 4, 5, 6].map((i) => ({ idx: i }));
 // Real eBay shop names for the BY ACCOUNT panel (slots 1-6).
 const ACCOUNT_NAMES = ["superfly", "aqualightingsolutions", "autolightingsolutions", "lightingdepot", "premiumlightingsolutions", "vividlighting"];
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const SCOPES = "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.finances";
+// SCOPES comes from vault.js so the rotate job verifies tokens against the same scopes.
 
 // ---------------------------------------------------------------- eBay
 async function ebayAccessToken(refreshToken) {
@@ -191,7 +192,7 @@ async function main() {
   const failed = [];
 
   for (const acc of ACCOUNTS) {
-    const refresh = process.env[`EBAY_REFRESH_TOKEN_${acc.idx}`];
+    const refresh = refreshTokenFor(acc.idx); // tokens/<n>.enc if rotated, else the EBAY_REFRESH_TOKEN_<n> secret
     if (!refresh) { failed.push(acc.idx); continue; }
 
     let ok = false, lastErr;
